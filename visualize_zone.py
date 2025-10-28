@@ -40,18 +40,30 @@ laser = HokuyoLX(addr=('192.168.0.10', 10940))
 TOUCH_THRESHOLD = 0.15   # м — зміна відстані для "дотику"
 MIN_POINTS = 5           # мінімальна кількість точок
 SMOOTHING = 0.3          # оновлення фону
+ANGLE_MIN = -90
+ANGLE_MAX = 90
 
 # --- Початковий фон
 print("⏳ Калібрую фон...")
 time.sleep(1)
 _, base_dist = laser.get_dist()
 base_dist = np.array(base_dist, dtype=float) / 1000.0
+angle_deg_full = np.linspace(-135, 135, len(base_dist))
+sector_mask = (angle_deg_full >= ANGLE_MIN) & (angle_deg_full <= ANGLE_MAX)
+angles = np.deg2rad(angle_deg_full[sector_mask])
+base_dist = base_dist[sector_mask]
+if np.isnan(base_dist).any():
+    valid = base_dist[~np.isnan(base_dist)]
+    fallback = valid.mean() if valid.size else 1.0
+    base_dist = np.where(np.isnan(base_dist), fallback, base_dist)
 print("✅ Калібрування завершено")
 
 # --- Підготовка графіка
 plt.ion()
 fig, ax = plt.subplots(figsize=(6, 6))
 sc = ax.scatter([], [], s=5, c='cyan')
+ax.scatter(0, 0, c='orange', marker='x', s=80)
+ax.text(0, 0, " Лідар", color='orange', fontsize=9, va='bottom')
 
 # межі графіка за даними полігона
 zone_x, zone_y = zip(*zone_points)
@@ -68,10 +80,10 @@ ax.plot(*zip(*verts), c='red', lw=2)
 # --- Основний цикл
 while plt.fignum_exists(fig.number):
     timestamp, dist_mm = laser.get_dist()
-    dist_m = np.array(dist_mm, dtype=float) / 1000.0
-    dist_m = np.nan_to_num(dist_m, nan=base_dist)
+    dist_full = np.array(dist_mm, dtype=float) / 1000.0
+    dist_m = dist_full[sector_mask]
+    dist_m = np.where(~np.isfinite(dist_m), base_dist, dist_m)
 
-    angles = np.linspace(-135, 135, len(dist_m)) * np.pi / 180.0
     x = dist_m * np.cos(angles)
     y = dist_m * np.sin(angles)
 
