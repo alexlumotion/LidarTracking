@@ -69,9 +69,14 @@ ax.text(0, 0, " Лідар", color='orange', fontsize=9, va='bottom')
 zone_x, zone_y = zip(*zone_points)
 ax.set_xlim(min(zone_x) - 0.5, max(zone_x) + 0.5)
 ax.set_ylim(min(zone_y) - 0.5, max(zone_y) + 0.5)
+ax.invert_yaxis()
 ax.set_xlabel('X (м)')
 ax.set_ylabel('Y (м)')
 ax.set_title('Hokuyo — трекінг у вибраній зоні')
+ax.text(ax.get_xlim()[1], ax.get_ylim()[0], " Право", color='gray', ha='right', va='top')
+ax.text(ax.get_xlim()[0], ax.get_ylim()[0], " Ліво", color='gray', ha='left', va='top')
+ax.text(ax.get_xlim()[1], ax.get_ylim()[1], " Низ", color='gray', ha='right', va='bottom')
+ax.text(ax.get_xlim()[0], ax.get_ylim()[1], " Верх", color='gray', ha='left', va='bottom')
 
 # малюємо полігон зони
 verts = zone_points + [zone_points[0]]
