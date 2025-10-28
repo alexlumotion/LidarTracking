@@ -4,12 +4,34 @@ import matplotlib.pyplot as plt
 from hokuyolx import HokuyoLX
 from matplotlib.path import Path
 import time
+from pathlib import Path as SysPath
 
-# --- Завантаження зони з файлу
-with open("zone_config.json", "r", encoding="utf-8") as f:
-    zone_points = json.load(f)["zone"]
+
+def load_zone_points():
+    while True:
+        choice = input(
+            "Вибери зону: 0 — з файлу zone_config.json, 1 — стандартна зона 1×1 м: "
+        ).strip()
+        if choice in {"0", "1"}:
+            break
+        print("Введи 0 або 1.")
+
+    if choice == "0":
+        config_path = SysPath("zone_config.json")
+        if not config_path.exists():
+            raise FileNotFoundError("zone_config.json не знайдено. Спочатку виконай setup_zone.py.")
+        with config_path.open("r", encoding="utf-8") as f:
+            points = json.load(f)["zone"]
+        print(f"✅ Завантажено зону з 4 точок: {points}")
+        return points
+
+    custom_points = [(-0.5, 0.0), (0.5, 0.0), (0.5, 1.0), (-0.5, 1.0)]
+    print(f"✅ Використовую стандартну зону 1×1 м: {custom_points}")
+    return custom_points
+
+
+zone_points = load_zone_points()
 zone_path = Path(zone_points)
-print(f"✅ Завантажено зону з 4 точок: {zone_points}")
 
 # --- Підключення до лідару
 laser = HokuyoLX(addr=('192.168.0.10', 10940))
