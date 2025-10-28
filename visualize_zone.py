@@ -23,14 +23,14 @@ def load_zone_points():
         with config_path.open("r", encoding="utf-8") as f:
             points = json.load(f)["zone"]
         print(f"✅ Завантажено зону з 4 точок: {points}")
-        return points
+        return points, False
 
     custom_points = [(-0.5, 0.0), (0.5, 0.0), (0.5, 1.0), (-0.5, 1.0)]
     print(f"✅ Використовую стандартну зону 1×1 м: {custom_points}")
-    return custom_points
+    return custom_points, True
 
 
-zone_points = load_zone_points()
+zone_points, is_custom_zone = load_zone_points()
 zone_path = Path(zone_points)
 
 # --- Підключення до лідару
@@ -67,8 +67,10 @@ ax.text(0, 0, " Лідар", color='orange', fontsize=9, va='bottom')
 
 # межі графіка за даними полігона
 zone_x, zone_y = zip(*zone_points)
-ax.set_xlim(min(zone_x) - 0.5, max(zone_x) + 0.5)
-ax.set_ylim(min(zone_y) - 0.5, max(zone_y) + 0.5)
+marg_x = 0.0 if is_custom_zone else 0.5
+marg_y = 0.0 if is_custom_zone else 0.5
+ax.set_xlim(min(zone_x) - marg_x, max(zone_x) + marg_x)
+ax.set_ylim(min(zone_y) - marg_y, max(zone_y) + marg_y)
 ax.invert_yaxis()
 ax.invert_xaxis()
 ax.set_xlabel('X (м)')
