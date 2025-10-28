@@ -66,27 +66,29 @@ ax.scatter(0, 0, c='orange', marker='x', s=80)
 ax.text(0, 0, " Лідар", color='orange', fontsize=9, va='bottom')
 
 # межі графіка за даними полігона
-zone_x, zone_y = zip(*zone_points)
-marg_x = 0.0 if is_custom_zone else 0.5
-marg_y = 0.0 if is_custom_zone else 0.5
-x_min, x_max = min(zone_x) - marg_x, max(zone_x) + marg_x
-y_min, y_max = min(zone_y) - marg_y, max(zone_y) + marg_y
+zone_forward = [pt[0] for pt in zone_points]
+zone_lateral = [pt[1] for pt in zone_points]
+margin_forward = 0.0 if is_custom_zone else 0.5
+margin_lateral = 0.0 if is_custom_zone else 0.5
+x_min, x_max = min(zone_lateral) - margin_lateral, max(zone_lateral) + margin_lateral
+y_min, y_max = min(zone_forward) - margin_forward, max(zone_forward) + margin_forward
 ax.set_xlim(x_min, x_max)
-ax.invert_xaxis()
 ax.set_ylim(y_min, y_max)
-ax.set_xlabel('X (м)')
-ax.set_ylabel('Y (м)')
+ax.set_xlabel('Y (м) — ліво/право')
+ax.set_ylabel('X (м) — вперед')
 ax.set_title('Hokuyo — трекінг у вибраній зоні')
 x_left, x_right = ax.get_xlim()
 y_bottom, y_top = ax.get_ylim()
 ax.text(x_left, y_bottom, " Ліво", color='gray', ha='left', va='bottom')
 ax.text(x_right, y_bottom, " Право", color='gray', ha='right', va='bottom')
-ax.text(x_left, y_top, " Верх", color='gray', ha='left', va='top')
-ax.text(x_right, y_top, " Низ", color='gray', ha='right', va='top')
+ax.text((x_left + x_right) / 2.0, y_top, " Вперед", color='gray', ha='center', va='top')
+ax.text((x_left + x_right) / 2.0, y_bottom, " Ближче", color='gray', ha='center', va='bottom')
 
 # малюємо полігон зони
 verts = zone_points + [zone_points[0]]
-ax.plot(*zip(*verts), c='red', lw=2)
+plot_x = [pt[1] for pt in verts]
+plot_y = [pt[0] for pt in verts]
+ax.plot(plot_x, plot_y, c='red', lw=2)
 
 # --- Основний цикл
 while plt.fignum_exists(fig.number):
@@ -103,7 +105,7 @@ while plt.fignum_exists(fig.number):
     x_in, y_in = x[inside_mask], y[inside_mask]
 
     # оновлення графіка
-    sc.set_offsets(np.c_[x_in, y_in])
+    sc.set_offsets(np.c_[y_in, x_in])
     fig.canvas.draw()
     fig.canvas.flush_events()
 
