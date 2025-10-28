@@ -1,4 +1,7 @@
 import json
+import socket
+import threading
+from queue import Queue
 import numpy as np
 import matplotlib.pyplot as plt
 from hokuyolx import HokuyoLX
@@ -30,11 +33,88 @@ def load_zone_points():
     return custom_points, True
 
 
+class TouchEventServer:
+    def __init__(self, host: str, port: int):
+        self.host = host
+        self.port = port
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server_socket.bind((self.host, self.port))
+        self.server_socket.listen(1)
+        self.server_socket.settimeout(1.0)
+        self.client = None
+        self.client_lock = threading.Lock()
+        self.queue: Queue = Queue()
+        self.running = True
+        self.accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self.sender_thread = threading.Thread(target=self._sender_loop, daemon=True)
+        self.accept_thread.start()
+        self.sender_thread.start()
+        print(f"📡 TouchEventServer listening on {self.host}:{self.port}")
+
+    def _accept_loop(self):
+        while self.running:
+            try:
+                conn, addr = self.server_socket.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            with self.client_lock:
+                if self.client:
+                    try:
+                        self.client.close()
+                    except OSError:
+                        pass
+                self.client = conn
+                self.client.settimeout(2.0)
+            print(f"🔌 Client connected from {addr}")
+
+    def _sender_loop(self):
+        while self.running:
+            event = self.queue.get()
+            if event is None:
+                break
+            payload = json.dumps(event) + "\n"
+            with self.client_lock:
+                client = self.client
+            if not client:
+                continue
+            try:
+                client.sendall(payload.encode("utf-8"))
+            except OSError:
+                print("⚠️ Client disconnected")
+                with self.client_lock:
+                    try:
+                        if self.client:
+                            self.client.close()
+                    except OSError:
+                        pass
+                    self.client = None
+
+    def send_event(self, event: dict):
+        if self.running:
+            self.queue.put(event)
+
+    def shutdown(self):
+        self.running = False
+        try:
+            self.server_socket.close()
+        except OSError:
+            pass
+        self.queue.put(None)
+        with self.client_lock:
+            if self.client:
+                try:
+                    self.client.close()
+                except OSError:
+                    pass
+                self.client = None
+        print("🛑 TouchEventServer stopped")
+
+
 zone_points, is_custom_zone = load_zone_points()
 zone_path = Path(zone_points)
-
-# --- Підключення до лідару
-laser = HokuyoLX(addr=('192.168.0.10', 10940))
 
 # --- Параметри виявлення
 TOUCH_THRESHOLD = 0.15   # м — зміна відстані для "дотику"
@@ -42,6 +122,14 @@ MIN_POINTS = 5           # мінімальна кількість точок
 SMOOTHING = 0.3          # оновлення фону
 ANGLE_MIN = -90
 ANGLE_MAX = 90
+ACTIVATION_FRAMES = 2    # кількість послідовних кадрів для підтвердження появи
+DEACTIVATION_FRAMES = 3  # кількість порожніх кадрів для завершення події
+SERVER_HOST = "0.0.0.0"
+SERVER_PORT = 9100
+
+# --- Підключення до лідару
+laser = HokuyoLX(addr=('192.168.0.10', 10940))
+event_server = TouchEventServer(SERVER_HOST, SERVER_PORT)
 
 # --- Початковий фон
 print("⏳ Калібрую фон...")
@@ -90,6 +178,12 @@ plot_x = [pt[1] for pt in verts]
 plot_y = [pt[0] for pt in verts]
 ax.plot(plot_x, plot_y, c='red', lw=2)
 
+# --- Стан події
+is_touch_active = False
+last_touch_coords = None
+touch_frames = 0
+missing_frames = 0
+
 # --- Основний цикл
 while plt.fignum_exists(fig.number):
     timestamp, dist_mm = laser.get_dist()
@@ -118,8 +212,43 @@ while plt.fignum_exists(fig.number):
         idx = np.where(touch_mask & inside_mask)[0]
         x_touch = np.mean(x[idx])
         y_touch = np.mean(y[idx])
-        print(f"👉 Touch detected at ({x_touch:.2f}, {y_touch:.2f}) м — {touch_points} точок")
+        last_touch_coords = (x_touch, y_touch)
+        touch_frames += 1
+        missing_frames = 0
+        if not is_touch_active and touch_frames >= ACTIVATION_FRAMES:
+            is_touch_active = True
+            print(f"👉 Touch started at ({x_touch:.2f}, {y_touch:.2f}) м — {touch_points} точок")
+            event_server.send_event(
+                {
+                    "event": "touch_start",
+                    "x": float(x_touch),
+                    "y": float(y_touch),
+                    "points": int(touch_points),
+                    "timestamp": time.time(),
+                }
+            )
+    else:
+        touch_frames = 0
+        missing_frames += 1
+        if is_touch_active and missing_frames >= DEACTIVATION_FRAMES:
+            is_touch_active = False
+            if last_touch_coords:
+                print(f"👋 Touch ended near ({last_touch_coords[0]:.2f}, {last_touch_coords[1]:.2f}) м")
+            else:
+                print("👋 Touch ended")
+            event_server.send_event(
+                {
+                    "event": "touch_end",
+                    "x": float(last_touch_coords[0]) if last_touch_coords else None,
+                    "y": float(last_touch_coords[1]) if last_touch_coords else None,
+                    "timestamp": time.time(),
+                }
+            )
+            last_touch_coords = None
+            missing_frames = 0
 
     # оновлення фону
     base_dist = (1 - SMOOTHING) * base_dist + SMOOTHING * dist_m
     time.sleep(0.05)
+
+event_server.shutdown()
