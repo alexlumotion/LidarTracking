@@ -13,11 +13,11 @@ from pathlib import Path as SysPath
 def load_zone_points():
     while True:
         choice = input(
-            "Вибери зону: 0 — з файлу zone_config.json, 1 — стандартна зона 1×1 м: "
+            "Вибери зону: 0 — з файлу zone_config.json, 1 — стандартна зона 1×1 м, 2 — весь діапазон 270° (радіус 1 м): "
         ).strip()
-        if choice in {"0", "1"}:
+        if choice in {"0", "1", "2"}:
             break
-        print("Введи 0 або 1.")
+        print("Введи 0, 1 або 2.")
 
     if choice == "0":
         config_path = SysPath("zone_config.json")
@@ -26,11 +26,19 @@ def load_zone_points():
         with config_path.open("r", encoding="utf-8") as f:
             points = json.load(f)["zone"]
         print(f"✅ Завантажено зону з 4 точок: {points}")
-        return points, False
+        return {"points": points, "is_custom_zone": False, "mode": "polygon"}
 
-    custom_points = [(-0.5, 0.0), (0.5, 0.0), (0.5, 1.0), (-0.5, 1.0)]
-    print(f"✅ Використовую стандартну зону 1×1 м: {custom_points}")
-    return custom_points, True
+    if choice == "1":
+        custom_points = [(-0.5, 0.0), (0.5, 0.0), (0.5, 1.0), (-0.5, 1.0)]
+        print(f"✅ Використовую стандартну зону 1×1 м: {custom_points}")
+        return {"points": custom_points, "is_custom_zone": True, "mode": "polygon"}
+
+    radius = 1.0
+    arc_deg = np.linspace(-135, 135, 181)
+    arc_points = [(radius * np.cos(np.deg2rad(deg)), radius * np.sin(np.deg2rad(deg))) for deg in arc_deg]
+    sector_points = [(0.0, 0.0)] + arc_points + [(0.0, 0.0)]
+    print(f"✅ Використовую повний діапазон лідару 270° з радіусом {radius} м")
+    return {"points": sector_points, "is_custom_zone": True, "mode": "sector", "radius": radius}
 
 
 class TouchEventServer:
@@ -113,15 +121,22 @@ class TouchEventServer:
         print("🛑 TouchEventServer stopped")
 
 
-zone_points, is_custom_zone = load_zone_points()
+zone_config = load_zone_points()
+zone_points = zone_config["points"]
+is_custom_zone = zone_config["is_custom_zone"]
+mode = zone_config["mode"]
+radius_limit = zone_config.get("radius")
 zone_path = Path(zone_points)
 
 # --- Параметри виявлення
 TOUCH_THRESHOLD = 0.15   # м — зміна відстані для "дотику"
 MIN_POINTS = 5           # мінімальна кількість точок
 SMOOTHING = 0.3          # оновлення фону
-ANGLE_MIN = -90
-ANGLE_MAX = 90
+ANGLE_LIMITS = {
+    "polygon": (-90, 90),
+    "sector": (-135, 135),
+}
+ANGLE_MIN, ANGLE_MAX = ANGLE_LIMITS.get(mode, (-90, 90))
 ACTIVATION_FRAMES = 2    # кількість послідовних кадрів для підтвердження появи
 DEACTIVATION_FRAMES = 3  # кількість порожніх кадрів для завершення події
 SERVER_HOST = "0.0.0.0"
@@ -156,8 +171,11 @@ ax.text(0, 0, " Лідар", color='orange', fontsize=9, va='bottom')
 # межі графіка за даними полігона
 zone_forward = [pt[0] for pt in zone_points]
 zone_lateral = [pt[1] for pt in zone_points]
-margin_forward = 0.0 if is_custom_zone else 0.5
-margin_lateral = 0.0 if is_custom_zone else 0.5
+if mode == "sector":
+    margin_forward = margin_lateral = 0.2
+else:
+    margin_forward = 0.0 if is_custom_zone else 0.5
+    margin_lateral = 0.0 if is_custom_zone else 0.5
 x_min, x_max = min(zone_lateral) - margin_lateral, max(zone_lateral) + margin_lateral
 y_min, y_max = min(zone_forward) - margin_forward, max(zone_forward) + margin_forward
 ax.set_xlim(x_min, x_max)
@@ -194,8 +212,12 @@ while plt.fignum_exists(fig.number):
     x = dist_m * np.cos(angles)
     y = dist_m * np.sin(angles)
 
-    # фільтруємо лише точки всередині полігона
-    inside_mask = zone_path.contains_points(np.c_[x, y])
+    # фільтруємо лише точки всередині активної зони
+    if mode == "sector":
+        limit = radius_limit if radius_limit is not None else 1.0
+        inside_mask = dist_m <= limit
+    else:
+        inside_mask = zone_path.contains_points(np.c_[x, y])
     x_in, y_in = x[inside_mask], y[inside_mask]
 
     # оновлення графіка
