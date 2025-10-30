@@ -53,6 +53,8 @@ DETECTION_PRESETS = {
     },
 }
 
+LOOP_SLEEP_SECONDS = 0.02
+
 
 def _fallback_dbscan(coords: np.ndarray, eps: float, min_samples: int) -> np.ndarray:
     """Проста реалізація DBSCAN, якщо sklearn недоступний."""
@@ -317,7 +319,7 @@ def run_touch_detection(
 
             if total_active_points == 0:
                 base_dist = (1 - smoothing) * base_dist + smoothing * dist_m
-            time.sleep(0.05)
+            time.sleep(LOOP_SLEEP_SECONDS)
     finally:
         event_server.shutdown()
         reset_laser()
