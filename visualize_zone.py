@@ -127,6 +127,26 @@ class TouchEventServer:
 
 
 FLIP_Y = True  # тестове віддзеркалення ліво/право
+DETECTION_PROFILE = "ball"  # режими: "touch" | "ball"
+
+DETECTION_PRESETS = {
+    "touch": {
+        "threshold": 0.15,
+        "min_points": 5,
+        "smoothing": 0.3,
+        "activation_frames": 2,
+        "deactivation_frames": 3,
+        "debounce": 0.1,
+    },
+    "ball": {
+        "threshold": 0.07,
+        "min_points": 2,
+        "smoothing": 0.05,
+        "activation_frames": 1,
+        "deactivation_frames": 1,
+        "debounce": 0.4,
+    },
+}
 
 zone_config = load_zone_points()
 zone_points = zone_config["points"]
@@ -138,15 +158,20 @@ radius_limit = zone_config.get("radius")
 zone_path = Path(zone_points)
 
 # --- Параметри виявлення
-TOUCH_THRESHOLD = 0.15   # м — зміна відстані для "дотику"
-MIN_POINTS = 5           # мінімальна кількість точок
-SMOOTHING = 0.3          # оновлення фону
+if DETECTION_PROFILE not in DETECTION_PRESETS:
+    raise ValueError(f"Невідомий DETECTION_PROFILE: {DETECTION_PROFILE}")
+
+detector_cfg = DETECTION_PRESETS[DETECTION_PROFILE]
+TOUCH_THRESHOLD = detector_cfg["threshold"]   # м — зміна відстані для спрацювання
+MIN_POINTS = detector_cfg["min_points"]       # мінімальна кількість активних променів
+SMOOTHING = detector_cfg["smoothing"]         # швидкість оновлення фону
 if mode == "sector":
     ANGLE_MIN, ANGLE_MAX = -135, 135
 else:
     ANGLE_MIN, ANGLE_MAX = (-80, 80) if is_custom_zone else (-90, 90)
-ACTIVATION_FRAMES = 2    # кількість послідовних кадрів для підтвердження появи
-DEACTIVATION_FRAMES = 3  # кількість порожніх кадрів для завершення події
+ACTIVATION_FRAMES = detector_cfg["activation_frames"]
+DEACTIVATION_FRAMES = detector_cfg["deactivation_frames"]
+DEBOUNCE_SECONDS = detector_cfg["debounce"]
 SERVER_HOST = "0.0.0.0"
 SERVER_PORT = 9100
 
@@ -209,6 +234,7 @@ is_touch_active = False
 last_touch_coords = None
 touch_frames = 0
 missing_frames = 0
+last_detection_time = 0.0
 
 # --- Основний цикл
 while plt.fignum_exists(fig.number):
@@ -235,28 +261,31 @@ while plt.fignum_exists(fig.number):
     fig.canvas.draw()
     fig.canvas.flush_events()
 
-    # виявлення дотиків
+    # виявлення дотиків / кидків
     diff = base_dist - dist_m
-    touch_mask = (diff > TOUCH_THRESHOLD)
-    touch_points = np.sum(touch_mask & inside_mask)
+    signal_mask = diff >= TOUCH_THRESHOLD
+    active_idx = np.where(signal_mask & inside_mask)[0]
+    touch_points = active_idx.size
+    now = time.time()
+    cooldown_passed = (now - last_detection_time) >= DEBOUNCE_SECONDS
 
-    if touch_points > MIN_POINTS:
-        idx = np.where(touch_mask & inside_mask)[0]
-        x_touch = np.mean(x[idx])
-        y_touch = np.mean(y[idx])
+    if touch_points >= MIN_POINTS:
+        x_touch = float(np.mean(x[active_idx]))
+        y_touch = float(np.mean(y[active_idx]))
         last_touch_coords = (x_touch, y_touch)
         touch_frames += 1
         missing_frames = 0
-        if not is_touch_active and touch_frames >= ACTIVATION_FRAMES:
+        if not is_touch_active and touch_frames >= ACTIVATION_FRAMES and cooldown_passed:
             is_touch_active = True
-            print(f"👉 Touch started at ({x_touch:.2f}, {y_touch:.2f}) м — {touch_points} точок")
+            last_detection_time = now
+            print(f"🎾 Ball detected at ({x_touch:.2f}, {y_touch:.2f}) м — {touch_points} променів")
             event_server.send_event(
                 {
                     "event": "touch_start",
-                    "x": float(x_touch),
-                    "y": float(y_touch),
+                    "x": x_touch,
+                    "y": y_touch,
                     "points": int(touch_points),
-                    "timestamp": time.time(),
+                    "timestamp": now,
                 }
             )
     else:
@@ -265,22 +294,21 @@ while plt.fignum_exists(fig.number):
         if is_touch_active and missing_frames >= DEACTIVATION_FRAMES:
             is_touch_active = False
             if last_touch_coords:
-                print(f"👋 Touch ended near ({last_touch_coords[0]:.2f}, {last_touch_coords[1]:.2f}) м")
-            else:
-                print("👋 Touch ended")
+                print(f"✅ Ball cleared near ({last_touch_coords[0]:.2f}, {last_touch_coords[1]:.2f}) м")
             event_server.send_event(
                 {
                     "event": "touch_end",
                     "x": float(last_touch_coords[0]) if last_touch_coords else None,
                     "y": float(last_touch_coords[1]) if last_touch_coords else None,
-                    "timestamp": time.time(),
+                    "timestamp": now,
                 }
             )
             last_touch_coords = None
             missing_frames = 0
 
-    # оновлення фону
-    base_dist = (1 - SMOOTHING) * base_dist + SMOOTHING * dist_m
+    # оновлення фону — лише коли немає активних променів
+    if touch_points == 0:
+        base_dist = (1 - SMOOTHING) * base_dist + SMOOTHING * dist_m
     time.sleep(0.05)
 
 event_server.shutdown()
