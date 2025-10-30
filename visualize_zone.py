@@ -29,8 +29,13 @@ def load_zone_points():
         return {"points": points, "is_custom_zone": False, "mode": "polygon"}
 
     if choice == "1":
-        custom_points = [(-0.5, 0.0), (0.5, 0.0), (0.5, 1.0), (-0.5, 1.0)]
-        print(f"✅ Використовую стандартну зону 1×1 м: {custom_points}")
+        custom_points = [
+            (0.0, -0.5),
+            (1.0, -0.5),
+            (1.0, 0.5),
+            (0.0, 0.5),
+        ]
+        print(f"✅ Використовую стандартну зону 1×1 м (X: 0–1 м, Y: -0.5–0.5 м): {custom_points}")
         return {"points": custom_points, "is_custom_zone": True, "mode": "polygon"}
 
     radius = 1.0
@@ -132,11 +137,10 @@ zone_path = Path(zone_points)
 TOUCH_THRESHOLD = 0.15   # м — зміна відстані для "дотику"
 MIN_POINTS = 5           # мінімальна кількість точок
 SMOOTHING = 0.3          # оновлення фону
-ANGLE_LIMITS = {
-    "polygon": (-90, 90),
-    "sector": (-135, 135),
-}
-ANGLE_MIN, ANGLE_MAX = ANGLE_LIMITS.get(mode, (-90, 90))
+if mode == "sector":
+    ANGLE_MIN, ANGLE_MAX = -135, 135
+else:
+    ANGLE_MIN, ANGLE_MAX = (-80, 80) if is_custom_zone else (-90, 90)
 ACTIVATION_FRAMES = 2    # кількість послідовних кадрів для підтвердження появи
 DEACTIVATION_FRAMES = 3  # кількість порожніх кадрів для завершення події
 SERVER_HOST = "0.0.0.0"
