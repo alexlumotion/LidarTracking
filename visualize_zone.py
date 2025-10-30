@@ -148,6 +148,9 @@ DETECTION_PRESETS = {
     },
 }
 
+LASER_MAX_RETRIES = 3
+LASER_RECONNECT_DELAY = 0.5
+
 zone_config = load_zone_points()
 zone_points = zone_config["points"]
 if FLIP_Y:
@@ -176,13 +179,59 @@ SERVER_HOST = "0.0.0.0"
 SERVER_PORT = 9100
 
 # --- Підключення до лідару
-laser = HokuyoLX(addr=('192.168.0.10', 10940))
+def create_laser():
+    return HokuyoLX(addr=('192.168.0.10', 10940))
+
+
+laser = None
+
+
+def reset_laser():
+    global laser
+    if laser is None:
+        return
+    closer = getattr(laser, "close", None)
+    if callable(closer):
+        try:
+            closer()
+        except Exception as exc:
+            print(f"⚠️ Помилка при закритті Hokuyo: {exc}")
+    laser = None
+
+
+def fetch_scan(max_retries: int = LASER_MAX_RETRIES):
+    global laser
+    last_exc = None
+    for attempt in range(1, max_retries + 1):
+        if laser is None:
+            try:
+                laser = create_laser()
+                print("🔄 Hokuyo підключено")
+            except Exception as exc:
+                last_exc = exc
+                print(f"⚠️ Не вдалося підключити Hokuyo ({attempt}/{max_retries}): {exc}")
+                time.sleep(LASER_RECONNECT_DELAY * attempt)
+                continue
+        try:
+            return laser.get_dist()
+        except Exception as exc:
+            last_exc = exc
+            print(f"⚠️ Помилка читання Hokuyo ({attempt}/{max_retries}): {exc}")
+            reset_laser()
+            time.sleep(LASER_RECONNECT_DELAY * attempt)
+    raise RuntimeError(f"Не вдалося отримати дані з Hokuyo: {last_exc}")
+
+
 event_server = TouchEventServer(SERVER_HOST, SERVER_PORT)
 
 # --- Початковий фон
 print("⏳ Калібрую фон...")
 time.sleep(1)
-_, base_dist = laser.get_dist()
+try:
+    _, base_dist = fetch_scan()
+except RuntimeError as exc:
+    event_server.shutdown()
+    raise SystemExit(f"❌ Критична помилка під час калібрування: {exc}")
 base_dist = np.array(base_dist, dtype=float) / 1000.0
 angle_deg_full = np.linspace(-135, 135, len(base_dist))
 sector_mask = (angle_deg_full >= ANGLE_MIN) & (angle_deg_full <= ANGLE_MAX)
@@ -238,7 +287,13 @@ last_detection_time = 0.0
 
 # --- Основний цикл
 while plt.fignum_exists(fig.number):
-    timestamp, dist_mm = laser.get_dist()
+    try:
+        timestamp, dist_mm = fetch_scan()
+    except RuntimeError as exc:
+        print(f"❌ Неможливо отримати дані від Hokuyo: {exc}")
+        time.sleep(LASER_RECONNECT_DELAY)
+        continue
+
     dist_full = np.array(dist_mm, dtype=float) / 1000.0
     dist_m = dist_full[sector_mask]
     dist_m = np.where(~np.isfinite(dist_m), base_dist, dist_m)
