@@ -126,8 +126,12 @@ class TouchEventServer:
         print("🛑 TouchEventServer stopped")
 
 
+FLIP_Y = True  # тестове віддзеркалення ліво/право
+
 zone_config = load_zone_points()
 zone_points = zone_config["points"]
+if FLIP_Y:
+    zone_points = [(pt[0], -pt[1]) for pt in zone_points]
 is_custom_zone = zone_config["is_custom_zone"]
 mode = zone_config["mode"]
 radius_limit = zone_config.get("radius")
@@ -215,6 +219,8 @@ while plt.fignum_exists(fig.number):
 
     x = dist_m * np.cos(angles)
     y = dist_m * np.sin(angles)
+    if FLIP_Y:
+        y = -y
 
     # фільтруємо лише точки всередині активної зони
     if mode == "sector":
