@@ -186,7 +186,6 @@ def run_touch_detection(
 
         tracked_clusters: Dict[int, TrackedCluster] = {}
         next_cluster_id = 1
-        last_global_detection_time = 0.0
 
         while plt.fignum_exists(fig.number):
             try:
@@ -274,16 +273,10 @@ def run_touch_detection(
                 cluster_state.updated = True
 
                 if not cluster_state.is_active:
-                    cluster_cooldown_passed = (now - cluster_state.last_detection_time) >= debounce_seconds
-                    global_cooldown_passed = (now - last_global_detection_time) >= debounce_seconds
-                    if (
-                        cluster_state.touch_frames >= activation_frames
-                        and cluster_cooldown_passed
-                        and global_cooldown_passed
-                    ):
+                    cooldown_passed = (now - cluster_state.last_detection_time) >= debounce_seconds
+                    if cluster_state.touch_frames >= activation_frames and cooldown_passed:
                         cluster_state.is_active = True
                         cluster_state.last_detection_time = now
-                        last_global_detection_time = now
                         x_touch, y_touch = cluster_state.centroid
                         print(f"🎾 Ball detected at ({x_touch:.2f}, {y_touch:.2f}) м — {cluster_state.points} променів")
                         event_server.send_event(
