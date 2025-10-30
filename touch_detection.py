@@ -1,5 +1,6 @@
 import time
-from typing import List, Optional, Sequence, Tuple
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -7,6 +8,23 @@ from matplotlib.path import Path
 
 from event_server import TouchEventServer
 from lidar_io import LASER_RECONNECT_DELAY, fetch_scan, reset_laser
+
+try:
+    from sklearn.cluster import DBSCAN as SklearnDBSCAN
+except ImportError:
+    SklearnDBSCAN = None
+
+
+@dataclass
+class TrackedCluster:
+    centroid: Tuple[float, float]
+    points: int
+    touch_frames: int = 0
+    missing_frames: int = 0
+    is_active: bool = False
+    last_detection_time: float = 0.0
+    last_touch_coords: Optional[Tuple[float, float]] = None
+    updated: bool = False
 
 
 FLIP_Y = True  # тестове віддзеркалення ліво/право
@@ -20,6 +38,8 @@ DETECTION_PRESETS = {
         "activation_frames": 2,
         "deactivation_frames": 3,
         "debounce": 0.1,
+        "cluster_eps": 0.07,
+        "cluster_match": 0.15,
     },
     "ball": {
         "threshold": 0.07,
@@ -28,8 +48,64 @@ DETECTION_PRESETS = {
         "activation_frames": 1,
         "deactivation_frames": 1,
         "debounce": 0.4,
+        "cluster_eps": 0.06,
+        "cluster_match": 0.12,
     },
 }
+
+
+def _fallback_dbscan(coords: np.ndarray, eps: float, min_samples: int) -> np.ndarray:
+    """Проста реалізація DBSCAN, якщо sklearn недоступний."""
+    n_points = coords.shape[0]
+    labels = -np.ones(n_points, dtype=int)
+    cluster_id = 0
+    visited = np.zeros(n_points, dtype=bool)
+    eps_sq = eps * eps
+    neighbors_cache: Dict[int, np.ndarray] = {}
+
+    def region_query(idx: int) -> np.ndarray:
+        if idx in neighbors_cache:
+            return neighbors_cache[idx]
+        deltas = coords - coords[idx]
+        dist_sq = np.einsum("ij,ij->i", deltas, deltas)
+        neighbors = np.where(dist_sq <= eps_sq)[0]
+        neighbors_cache[idx] = neighbors
+        return neighbors
+
+    for point_idx in range(n_points):
+        if visited[point_idx]:
+            continue
+        visited[point_idx] = True
+        neighbors = region_query(point_idx)
+        if neighbors.size < min_samples:
+            continue
+        labels[point_idx] = cluster_id
+        seeds = set(neighbors.tolist())
+        while seeds:
+            current = seeds.pop()
+            if not visited[current]:
+                visited[current] = True
+                current_neighbors = region_query(current)
+                if current_neighbors.size >= min_samples:
+                    seeds.update(current_neighbors.tolist())
+            if labels[current] == -1:
+                labels[current] = cluster_id
+        cluster_id += 1
+    return labels
+
+
+def cluster_active_points(x_vals: np.ndarray, y_vals: np.ndarray, eps: float, min_samples: int) -> List[np.ndarray]:
+    if x_vals.size == 0:
+        return []
+    coords = np.column_stack((x_vals, y_vals))
+    if SklearnDBSCAN is not None:
+        model = SklearnDBSCAN(eps=eps, min_samples=min_samples)
+        labels = model.fit_predict(coords)
+    else:
+        labels = _fallback_dbscan(coords, eps, min_samples)
+    unique_labels = [label for label in set(labels) if label != -1]
+    clusters = [np.where(labels == label)[0] for label in unique_labels]
+    return clusters
 
 
 def run_touch_detection(
@@ -53,6 +129,8 @@ def run_touch_detection(
     activation_frames = detector_cfg["activation_frames"]
     deactivation_frames = detector_cfg["deactivation_frames"]
     debounce_seconds = detector_cfg["debounce"]
+    cluster_eps = detector_cfg["cluster_eps"]
+    cluster_match = detector_cfg["cluster_match"]
 
     zone_path = Path(zone_points)
 
@@ -106,15 +184,13 @@ def run_touch_detection(
         plot_y = [pt[0] for pt in verts]
         ax.plot(plot_x, plot_y, c='red', lw=2)
 
-        is_touch_active = False
-        last_touch_coords = None
-        touch_frames = 0
-        missing_frames = 0
-        last_detection_time = 0.0
+        tracked_clusters: Dict[int, TrackedCluster] = {}
+        next_cluster_id = 1
+        last_global_detection_time = 0.0
 
         while plt.fignum_exists(fig.number):
             try:
-                timestamp, dist_mm = fetch_scan()
+                _, dist_mm = fetch_scan()
             except RuntimeError as exc:
                 print(f"❌ Неможливо отримати дані від Hokuyo: {exc}")
                 time.sleep(LASER_RECONNECT_DELAY)
@@ -143,48 +219,110 @@ def run_touch_detection(
             diff = base_dist - dist_m
             signal_mask = diff >= touch_threshold
             active_idx = np.where(signal_mask & inside_mask)[0]
-            touch_points = active_idx.size
+            touch_points = int(active_idx.size)
+            total_active_points = touch_points
             now = time.time()
-            cooldown_passed = (now - last_detection_time) >= debounce_seconds
 
+            for cluster in tracked_clusters.values():
+                cluster.updated = False
+
+            detected_clusters = []
             if touch_points >= min_points:
-                x_touch = float(np.mean(x[active_idx]))
-                y_touch = float(np.mean(y[active_idx]))
-                last_touch_coords = (x_touch, y_touch)
-                touch_frames += 1
-                missing_frames = 0
-                if not is_touch_active and touch_frames >= activation_frames and cooldown_passed:
-                    is_touch_active = True
-                    last_detection_time = now
-                    print(f"🎾 Ball detected at ({x_touch:.2f}, {y_touch:.2f}) м — {touch_points} променів")
-                    event_server.send_event(
+                cluster_indices = cluster_active_points(x[active_idx], y[active_idx], cluster_eps, min_points)
+                for local_indices in cluster_indices:
+                    actual_indices = active_idx[local_indices]
+                    x_cluster = x[actual_indices]
+                    y_cluster = y[actual_indices]
+                    centroid = (float(np.mean(x_cluster)), float(np.mean(y_cluster)))
+                    detected_clusters.append(
                         {
-                            "event": "touch_start",
-                            "x": x_touch,
-                            "y": y_touch,
-                            "points": int(touch_points),
-                            "timestamp": now,
+                            "indices": actual_indices,
+                            "centroid": centroid,
+                            "points": int(actual_indices.size),
                         }
                     )
-            else:
-                touch_frames = 0
-                missing_frames += 1
-                if is_touch_active and missing_frames >= deactivation_frames:
-                    is_touch_active = False
-                    if last_touch_coords:
-                        print(f"✅ Ball cleared near ({last_touch_coords[0]:.2f}, {last_touch_coords[1]:.2f}) м")
+
+            for detection in detected_clusters:
+                centroid = detection["centroid"]
+                assigned_id = None
+                best_distance = cluster_match
+                for cluster_id, cluster_state in tracked_clusters.items():
+                    if cluster_state.updated:
+                        continue
+                    dist = np.hypot(
+                        centroid[0] - cluster_state.centroid[0],
+                        centroid[1] - cluster_state.centroid[1],
+                    )
+                    if dist <= best_distance:
+                        best_distance = dist
+                        assigned_id = cluster_id
+
+                if assigned_id is None:
+                    assigned_id = next_cluster_id
+                    next_cluster_id += 1
+                    tracked_clusters[assigned_id] = TrackedCluster(
+                        centroid=centroid,
+                        points=detection["points"],
+                        last_touch_coords=centroid,
+                    )
+                cluster_state = tracked_clusters[assigned_id]
+                cluster_state.centroid = centroid
+                cluster_state.points = detection["points"]
+                cluster_state.last_touch_coords = centroid
+                cluster_state.touch_frames += 1
+                cluster_state.missing_frames = 0
+                cluster_state.updated = True
+
+                if not cluster_state.is_active:
+                    cluster_cooldown_passed = (now - cluster_state.last_detection_time) >= debounce_seconds
+                    global_cooldown_passed = (now - last_global_detection_time) >= debounce_seconds
+                    if (
+                        cluster_state.touch_frames >= activation_frames
+                        and cluster_cooldown_passed
+                        and global_cooldown_passed
+                    ):
+                        cluster_state.is_active = True
+                        cluster_state.last_detection_time = now
+                        last_global_detection_time = now
+                        x_touch, y_touch = cluster_state.centroid
+                        print(f"🎾 Ball detected at ({x_touch:.2f}, {y_touch:.2f}) м — {cluster_state.points} променів")
+                        event_server.send_event(
+                            {
+                                "event": "touch_start",
+                                "x": x_touch,
+                                "y": y_touch,
+                                "points": cluster_state.points,
+                                "timestamp": now,
+                            }
+                        )
+
+            clusters_to_remove = []
+            for cluster_id, cluster_state in tracked_clusters.items():
+                if cluster_state.updated:
+                    continue
+                cluster_state.touch_frames = 0
+                cluster_state.missing_frames += 1
+                if cluster_state.is_active and cluster_state.missing_frames >= deactivation_frames:
+                    cluster_state.is_active = False
+                    coords = cluster_state.last_touch_coords
+                    if coords:
+                        print(f"✅ Ball cleared near ({coords[0]:.2f}, {coords[1]:.2f}) м")
                     event_server.send_event(
                         {
                             "event": "touch_end",
-                            "x": float(last_touch_coords[0]) if last_touch_coords else None,
-                            "y": float(last_touch_coords[1]) if last_touch_coords else None,
+                            "x": float(coords[0]) if coords else None,
+                            "y": float(coords[1]) if coords else None,
                             "timestamp": now,
                         }
                     )
-                    last_touch_coords = None
-                    missing_frames = 0
+                    clusters_to_remove.append(cluster_id)
+                elif cluster_state.missing_frames >= deactivation_frames:
+                    clusters_to_remove.append(cluster_id)
 
-            if touch_points == 0:
+            for cluster_id in clusters_to_remove:
+                tracked_clusters.pop(cluster_id, None)
+
+            if total_active_points == 0:
                 base_dist = (1 - smoothing) * base_dist + smoothing * dist_m
             time.sleep(0.05)
     finally:
