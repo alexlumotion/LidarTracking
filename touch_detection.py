@@ -28,10 +28,11 @@ class TrackedCluster:
 
 
 FLIP_Y = True  # тестове віддзеркалення ліво/право
-USE_RAW_POINTS = True  # якщо True, надсилаємо кожен активний промінь без кластеризації
+USE_RAW_POINTS = False  # якщо True, надсилаємо кожен активний промінь без кластеризації
 ENABLE_ZONE_FILTER = True  # вимкни, щоб ігнорувати полігон зони
 ENABLE_THRESHOLD_FILTER = True  # вимкни, щоб пропускати порогове фільтрування
 RAW_POINT_EVENT = "touch_end"  # який тип події відправляти у raw-режимі
+DEBUG_LOGS = True  # встанови False, щоб вимкнути діагностику
 DETECTION_PROFILE = "ball"  # режими: "touch" | "ball"
 
 DETECTION_PRESETS = {
@@ -234,6 +235,18 @@ def run_touch_detection(
             total_active_points = touch_points
             now = time.time()
 
+            if DEBUG_LOGS:
+                diff_min = float(np.min(diff)) if diff.size else 0.0
+                diff_max = float(np.max(diff)) if diff.size else 0.0
+                print(
+                    f"[debug] touch_points={touch_points} diff_min={diff_min:.3f} diff_max={diff_max:.3f}"
+                )
+                if touch_points > 0:
+                    coords_sample = list(zip(x[active_idx], y[active_idx]))
+                    if len(coords_sample) > 5:
+                        coords_sample = coords_sample[:5]
+                    print(f"[debug] active_coords_sample={coords_sample}")
+
             for cluster in tracked_clusters.values():
                 cluster.updated = False
 
@@ -300,6 +313,10 @@ def run_touch_detection(
                 cluster_state.touch_frames += 1
                 cluster_state.missing_frames = 0
                 cluster_state.updated = True
+                if DEBUG_LOGS:
+                    print(
+                        f"[debug] cluster_id={assigned_id} frames={cluster_state.touch_frames} centroid={cluster_state.centroid}"
+                    )
 
                 if not cluster_state.is_active:
                     cooldown_passed = (now - cluster_state.last_detection_time) >= debounce_seconds
