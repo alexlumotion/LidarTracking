@@ -235,17 +235,16 @@ def run_touch_detection(
             total_active_points = touch_points
             now = time.time()
 
-            if DEBUG_LOGS:
+            if DEBUG_LOGS and touch_points > 0:
                 diff_min = float(np.min(diff)) if diff.size else 0.0
                 diff_max = float(np.max(diff)) if diff.size else 0.0
                 print(
                     f"[debug] touch_points={touch_points} diff_min={diff_min:.3f} diff_max={diff_max:.3f}"
                 )
-                if touch_points > 0:
-                    coords_sample = list(zip(x[active_idx], y[active_idx]))
-                    if len(coords_sample) > 5:
-                        coords_sample = coords_sample[:5]
-                    print(f"[debug] active_coords_sample={coords_sample}")
+                coords_sample = list(zip(x[active_idx], y[active_idx]))
+                if len(coords_sample) > 5:
+                    coords_sample = coords_sample[:5]
+                print(f"[debug] active_coords_sample={coords_sample}")
 
             for cluster in tracked_clusters.values():
                 cluster.updated = False
