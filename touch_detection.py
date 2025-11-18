@@ -28,8 +28,8 @@ class TrackedCluster:
 
 
 FLIP_Y = True  # тестове віддзеркалення ліво/право
-USE_RAW_POINTS = False  # якщо True, надсилаємо кожен активний промінь без кластеризації
-ENABLE_ZONE_FILTER = True  # вимкни, щоб ігнорувати полігон зони
+USE_RAW_POINTS = True  # якщо True, надсилаємо кожен активний промінь без кластеризації
+ENABLE_ZONE_FILTER = False  # вимкни, щоб ігнорувати полігон зони
 ENABLE_THRESHOLD_FILTER = True  # вимкни, щоб пропускати порогове фільтрування
 RAW_POINT_EVENT = "touch_end"  # який тип події відправляти у raw-режимі
 DEBUG_LOGS = True  # встанови False, щоб вимкнути діагностику
