@@ -28,6 +28,10 @@ class TrackedCluster:
 
 
 FLIP_Y = True  # тестове віддзеркалення ліво/право
+USE_RAW_POINTS = True  # якщо True, надсилаємо кожен активний промінь без кластеризації
+ENABLE_ZONE_FILTER = True  # вимкни, щоб ігнорувати полігон зони
+ENABLE_THRESHOLD_FILTER = True  # вимкни, щоб пропускати порогове фільтрування
+RAW_POINT_EVENT = "touch_end"  # який тип події відправляти у raw-режимі
 DETECTION_PROFILE = "ball"  # режими: "touch" | "ball"
 
 DETECTION_PRESETS = {
@@ -206,11 +210,14 @@ def run_touch_detection(
             if FLIP_Y:
                 y = -y
 
-            if mode == "sector":
-                limit = radius_limit if radius_limit is not None else 1.0
-                inside_mask = dist_m <= limit
+            if ENABLE_ZONE_FILTER:
+                if mode == "sector":
+                    limit = radius_limit if radius_limit is not None else 1.0
+                    inside_mask = dist_m <= limit
+                else:
+                    inside_mask = zone_path.contains_points(np.c_[x, y])
             else:
-                inside_mask = zone_path.contains_points(np.c_[x, y])
+                inside_mask = np.ones_like(dist_m, dtype=bool)
             x_in, y_in = x[inside_mask], y[inside_mask]
 
             sc.set_offsets(np.c_[y_in, x_in])
@@ -218,7 +225,10 @@ def run_touch_detection(
             fig.canvas.flush_events()
 
             diff = base_dist - dist_m
-            signal_mask = diff >= touch_threshold
+            if ENABLE_THRESHOLD_FILTER:
+                signal_mask = diff >= touch_threshold
+            else:
+                signal_mask = np.ones_like(diff, dtype=bool)
             active_idx = np.where(signal_mask & inside_mask)[0]
             touch_points = int(active_idx.size)
             total_active_points = touch_points
@@ -226,6 +236,23 @@ def run_touch_detection(
 
             for cluster in tracked_clusters.values():
                 cluster.updated = False
+
+            if USE_RAW_POINTS:
+                if touch_points > 0:
+                    for x_touch, y_touch in zip(x[active_idx], y[active_idx]):
+                        event_server.send_event(
+                            {
+                                "event": RAW_POINT_EVENT,
+                                "x": float(x_touch),
+                                "y": float(y_touch),
+                                "points": 1,
+                                "timestamp": now,
+                            }
+                        )
+                if total_active_points == 0:
+                    base_dist = (1 - smoothing) * base_dist + smoothing * dist_m
+                time.sleep(LOOP_SLEEP_SECONDS)
+                continue
 
             detected_clusters = []
             if touch_points >= min_points:
