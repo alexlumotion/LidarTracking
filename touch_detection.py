@@ -1,6 +1,7 @@
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from pathlib import Path as FSPath
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -8,6 +9,7 @@ from matplotlib.path import Path
 
 from event_server import TouchEventServer
 from lidar_io import LASER_RECONNECT_DELAY, fetch_scan, reset_laser
+from ubh_reader import iter_ubh_frames
 
 try:
     from sklearn.cluster import DBSCAN as SklearnDBSCAN
@@ -28,9 +30,9 @@ class TrackedCluster:
 
 
 FLIP_Y = True  # тестове віддзеркалення ліво/право
-USE_RAW_POINTS = True  # якщо True, надсилаємо кожен активний промінь без кластеризації
+USE_RAW_POINTS = False  # для тесту використовуємо кластеризацію
 ENABLE_ZONE_FILTER = True  # вимкни, щоб ігнорувати полігон зони
-ENABLE_THRESHOLD_FILTER = False  # вимкни, щоб пропускати порогове фільтрування
+ENABLE_THRESHOLD_FILTER = True  # використати відхилення від бази
 RAW_POINT_EVENT = "touch_end"  # який тип події відправляти у raw-режимі
 DEBUG_LOGS = True  # встанови False, щоб вимкнути діагностику
 DETECTION_PROFILE = "ball"  # режими: "touch" | "ball"
@@ -59,6 +61,9 @@ DETECTION_PRESETS = {
 }
 
 LOOP_SLEEP_SECONDS = 0.02
+REPLAY_UBH_FILE: Optional[str] = "2025_11_19_13_03_37_675.ubh"  # шлях до .ubh для офлайнового тесту
+REPLAY_LOOP = False  # якщо True, після кінця файлу починаємо спочатку
+MIN_POINTS_FOR_COUNT = 5  # мінімум променів, щоб зарахувати дотик
 
 
 def _fallback_dbscan(coords: np.ndarray, eps: float, min_samples: int) -> np.ndarray:
@@ -115,6 +120,23 @@ def cluster_active_points(x_vals: np.ndarray, y_vals: np.ndarray, eps: float, mi
     return clusters
 
 
+def _make_replay_fetcher(path: FSPath) -> Callable[[], Tuple[int, List[float]]]:
+    frames = iter_ubh_frames(path)
+
+    def fetch() -> Tuple[int, List[float]]:
+        nonlocal frames
+        try:
+            frame = next(frames)
+        except StopIteration:
+            if not REPLAY_LOOP:
+                raise RuntimeError("UBH replay завершився")
+            frames = iter_ubh_frames(path)
+            frame = next(frames)
+        return frame.timestamp, frame.ranges_mm.astype(float).tolist()
+
+    return fetch
+
+
 def run_touch_detection(
     zone_points: Sequence[Tuple[float, float]],
     is_custom_zone: bool,
@@ -141,11 +163,24 @@ def run_touch_detection(
 
     zone_path = Path(zone_points)
 
+    replay_fetch: Optional[Callable[[], Tuple[int, List[float]]]] = None
+    detected_touch_count = 0
+    last_event_time = 0.0
+    last_event_coords: Optional[Tuple[float, float]] = None
+    if REPLAY_UBH_FILE:
+        replay_fetch = _make_replay_fetcher(FSPath(REPLAY_UBH_FILE))
+        print(f"🔁 Використовую запис з файла {REPLAY_UBH_FILE}")
+
+    def next_scan() -> Tuple[int, List[float]]:
+        if replay_fetch is not None:
+            return replay_fetch()
+        return fetch_scan()
+
     try:
         print("⏳ Калібрую фон...")
         time.sleep(1)
         try:
-            _, base_dist = fetch_scan()
+            _, base_dist = next_scan()
         except RuntimeError as exc:
             raise SystemExit(f"❌ Критична помилка під час калібрування: {exc}")
         base_dist = np.array(base_dist, dtype=float) / 1000.0
@@ -196,7 +231,7 @@ def run_touch_detection(
 
         while plt.fignum_exists(fig.number):
             try:
-                _, dist_mm = fetch_scan()
+                _, dist_mm = next_scan()
             except RuntimeError as exc:
                 print(f"❌ Неможливо отримати дані від Hokuyo: {exc}")
                 time.sleep(LASER_RECONNECT_DELAY)
@@ -320,10 +355,32 @@ def run_touch_detection(
                 if not cluster_state.is_active:
                     cooldown_passed = (now - cluster_state.last_detection_time) >= debounce_seconds
                     if cluster_state.touch_frames >= activation_frames and cooldown_passed:
+                        same_event = False
+                        if last_event_coords is not None:
+                            dt = now - last_event_time
+                            dx = cluster_state.centroid[0] - last_event_coords[0]
+                            dy = cluster_state.centroid[1] - last_event_coords[1]
+                            same_event = dt <= 0.1 and (dx * dx + dy * dy) ** 0.5 <= 0.15
                         cluster_state.is_active = True
+                        countable = cluster_state.points >= MIN_POINTS_FOR_COUNT
+                        if not same_event and countable:
+                            detected_touch_count += 1
+                            last_event_time = now
+                            last_event_coords = cluster_state.centroid
                         cluster_state.last_detection_time = now
                         x_touch, y_touch = cluster_state.centroid
-                        print(f"🎾 Ball detected at ({x_touch:.2f}, {y_touch:.2f}) м — {cluster_state.points} променів")
+                        if same_event:
+                            print(
+                                f"[debug] merged into #{detected_touch_count} at ({x_touch:.2f}, {y_touch:.2f}) м — {cluster_state.points} променів"
+                            )
+                        elif countable:
+                            print(
+                                f"🎾 Ball detected #{detected_touch_count} at ({x_touch:.2f}, {y_touch:.2f}) м — {cluster_state.points} променів"
+                            )
+                        else:
+                            print(
+                                f"[debug] ignored cluster with {cluster_state.points} points (<{MIN_POINTS_FOR_COUNT}) at ({x_touch:.2f}, {y_touch:.2f})"
+                            )
                         event_server.send_event(
                             {
                                 "event": "touch_start",
@@ -366,3 +423,5 @@ def run_touch_detection(
     finally:
         event_server.shutdown()
         reset_laser()
+        if detected_touch_count:
+            print(f"ℹ️ Total detections: {detected_touch_count}")
