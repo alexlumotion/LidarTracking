@@ -61,7 +61,10 @@ DETECTION_PRESETS = {
 }
 
 LOOP_SLEEP_SECONDS = 0.02
-REPLAY_UBH_FILE: Optional[str] = "2025_11_19_13_03_37_675.ubh"  # шлях до .ubh для офлайнового тесту
+#REPLAY_UBH_FILE: Optional[str] = "2025_11_19_13_03_37_675.ubh"  # шлях до .ubh для офлайнового тесту
+# Set to None to read live scans instead of playback file
+REPLAY_UBH_FILE: Optional[str] = None  # шлях до .ubh для офлайнового тесту
+
 REPLAY_LOOP = False  # якщо True, після кінця файлу починаємо спочатку
 MIN_POINTS_FOR_COUNT = 5  # мінімум променів, щоб зарахувати дотик
 
