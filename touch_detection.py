@@ -1,7 +1,7 @@
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path as FSPath
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -27,6 +27,8 @@ class TrackedCluster:
     last_detection_time: float = 0.0
     last_touch_coords: Optional[Tuple[float, float]] = None
     updated: bool = False
+    collect_frames_remaining: int = 0
+    collected_points: List[Tuple[float, float]] = field(default_factory=list)
 
 
 FLIP_Y = True  # тестове віддзеркалення ліво/право
@@ -36,6 +38,12 @@ ENABLE_THRESHOLD_FILTER = True  # використати відхилення в
 RAW_POINT_EVENT = "touch_end"  # який тип події відправляти у raw-режимі
 DEBUG_LOGS = True  # встанови False, щоб вимкнути діагностику
 DETECTION_PROFILE = "ball"  # режими: "touch" | "ball"
+ENABLE_MULTI_FRAME_CAPTURE = True  # тестове накопичення точок протягом кількох кадрів
+MULTI_FRAME_WINDOW = 4  # скільки кадрів збирати підряд
+MULTI_FRAME_MIN_POINTS = 5  # мінімум променів, щоб стартувати збір
+SPIKE_DETECTION_MODE = True  # "сплеск" = серія кадрів з активними променями
+SPIKE_MIN_ACTIVE = 15  # мінімум променів для старту/підтримки сплеску
+SPIKE_THRESHOLD = 0.07  # м; відхилення від бази для врахування променя
 
 DETECTION_PRESETS = {
     "touch": {
@@ -49,24 +57,28 @@ DETECTION_PRESETS = {
         "cluster_match": 0.15,
     },
     "ball": {
-        "threshold": 0.07,
-        "min_points": 2,
+        "threshold": 0.04,
+        "min_points": 10,
         "smoothing": 0.05,
         "activation_frames": 1,
         "deactivation_frames": 1,
         "debounce": 0.4,
-        "cluster_eps": 0.06,
-        "cluster_match": 0.12,
+        "cluster_eps": 0.1,
+        "cluster_match": 0.25,
     },
 }
 
 LOOP_SLEEP_SECONDS = 0.02
-#REPLAY_UBH_FILE: Optional[str] = "2025_11_19_13_03_37_675.ubh"  # шлях до .ubh для офлайнового тесту
-# Set to None to read live scans instead of playback file
-REPLAY_UBH_FILE: Optional[str] = None  # шлях до .ubh для офлайнового тесту
+# REPLAY_UBH_FILE: Optional[str] = "2025_11_19_13_03_37_675.ubh"  # шлях до .ubh для офлайнового тесту
+# Set to None to read live scans замість файлу
+REPLAY_UBH_FILE: Optional[str] = "2025_11_20_17_05_01_950.ubh"  # шлях до .ubh для офлайнового тесту
+REPLAY_SPEED = 3.0  # 1.0 = як записано, 0.5 = вдвічі повільніше, 2.0 = вдвічі швидше
+PAUSE_POLL_SECONDS = 0.05  # затримка між перевірками паузи
 
 REPLAY_LOOP = False  # якщо True, після кінця файлу починаємо спочатку
 MIN_POINTS_FOR_COUNT = 5  # мінімум променів, щоб зарахувати дотик
+MERGE_EVENT_MAX_TIME = 0.15  # сек; поріг часу для об'єднання подій
+MERGE_EVENT_MAX_DISTANCE = 0.25  # м; відстань між центрами подій
 
 
 def _fallback_dbscan(coords: np.ndarray, eps: float, min_samples: int) -> np.ndarray:
@@ -123,19 +135,28 @@ def cluster_active_points(x_vals: np.ndarray, y_vals: np.ndarray, eps: float, mi
     return clusters
 
 
-def _make_replay_fetcher(path: FSPath) -> Callable[[], Tuple[int, List[float]]]:
+def _make_replay_fetcher(path: FSPath, speed: float) -> Callable[[], Tuple[int, str, List[float]]]:
     frames = iter_ubh_frames(path)
+    prev_timestamp: Optional[int] = None
+    speed = max(speed, 1e-3)
 
-    def fetch() -> Tuple[int, List[float]]:
-        nonlocal frames
+    def fetch() -> Tuple[int, str, List[float]]:
+        nonlocal frames, prev_timestamp
         try:
             frame = next(frames)
         except StopIteration:
             if not REPLAY_LOOP:
                 raise RuntimeError("UBH replay завершився")
             frames = iter_ubh_frames(path)
+            prev_timestamp = None
             frame = next(frames)
-        return frame.timestamp, frame.ranges_mm.astype(float).tolist()
+        if prev_timestamp is not None:
+            delta_ms = max(frame.timestamp - prev_timestamp, 0)
+            delay = (delta_ms / 1000.0) / speed
+            if delay > 0:
+                time.sleep(delay)
+        prev_timestamp = frame.timestamp
+        return frame.timestamp, frame.logtime, frame.ranges_mm.astype(float).tolist()
 
     return fetch
 
@@ -151,7 +172,7 @@ def run_touch_detection(
         raise ValueError(f"Невідомий DETECTION_PROFILE: {DETECTION_PROFILE}")
 
     detector_cfg = DETECTION_PRESETS[DETECTION_PROFILE]
-    touch_threshold = detector_cfg["threshold"]
+    touch_threshold = SPIKE_THRESHOLD if SPIKE_DETECTION_MODE else detector_cfg["threshold"]
     min_points = detector_cfg["min_points"]
     smoothing = detector_cfg["smoothing"]
     if mode == "sector":
@@ -170,20 +191,33 @@ def run_touch_detection(
     detected_touch_count = 0
     last_event_time = 0.0
     last_event_coords: Optional[Tuple[float, float]] = None
+    multi_frame_clusters: List[Dict[str, Any]] = []
     if REPLAY_UBH_FILE:
-        replay_fetch = _make_replay_fetcher(FSPath(REPLAY_UBH_FILE))
-        print(f"🔁 Використовую запис з файла {REPLAY_UBH_FILE}")
+        replay_fetch = _make_replay_fetcher(FSPath(REPLAY_UBH_FILE), REPLAY_SPEED)
+        speed_label = f"{REPLAY_SPEED:.2f}x" if abs(REPLAY_SPEED - 1.0) > 1e-3 else "1.0x"
+        print(f"🔁 Використовую запис з файла {REPLAY_UBH_FILE} (швидкість {speed_label})")
 
-    def next_scan() -> Tuple[int, List[float]]:
+    def next_scan() -> Tuple[int, str, List[float]]:
         if replay_fetch is not None:
             return replay_fetch()
-        return fetch_scan()
+        raw = fetch_scan()
+        timestamp: int
+        distances: List[float]
+        if isinstance(raw, tuple) and len(raw) == 2:
+            timestamp, distances = raw  # type: ignore[misc]
+        else:
+            timestamp = int(time.time() * 1000)
+            distances = raw  # type: ignore[assignment]
+        if isinstance(distances, np.ndarray):
+            distances = distances.astype(float).tolist()
+        logtime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp / 1000.0))
+        return timestamp, logtime, distances
 
     try:
         print("⏳ Калібрую фон...")
         time.sleep(1)
         try:
-            _, base_dist = next_scan()
+            _, _, base_dist = next_scan()
         except RuntimeError as exc:
             raise SystemExit(f"❌ Критична помилка під час калібрування: {exc}")
         base_dist = np.array(base_dist, dtype=float) / 1000.0
@@ -229,12 +263,113 @@ def run_touch_detection(
         plot_y = [pt[0] for pt in verts]
         ax.plot(plot_x, plot_y, c='red', lw=2)
 
+        paused = False
+        pause_text = ax.text(
+            0.02,
+            0.95,
+            "",
+            transform=ax.transAxes,
+            color="orange",
+            fontsize=10,
+            ha="left",
+            va="top",
+        )
+
+        def _update_pause_label() -> None:
+            pause_text.set_text("⏸️ Пауза" if paused else "")
+            fig.canvas.draw_idle()
+
+        def _on_key(event) -> None:
+            nonlocal paused
+            if event.key in (" ", "space", "p"):
+                paused = not paused
+                state_text = "⏸️ Пауза" if paused else "▶️ Продовжили"
+                print(f"{state_text} — натисни пробіл або 'p', щоб перемкнути")
+                _update_pause_label()
+
+        fig.canvas.mpl_connect("key_press_event", _on_key)
+
         tracked_clusters: Dict[int, TrackedCluster] = {}
         next_cluster_id = 1
 
+        def finalize_multi_frame_capture(cluster_id: int, cluster_state: TrackedCluster) -> None:
+            if not cluster_state.collected_points:
+                return
+            centroid_est = cluster_state.last_touch_coords or cluster_state.centroid
+            multi_frame_clusters.append(
+                {
+                    "cluster_id": cluster_id,
+                    "points": len(cluster_state.collected_points),
+                    "centroid": centroid_est,
+                }
+            )
+            print(
+                f"🧪 Multi-frame cluster #{len(multi_frame_clusters)} ({len(cluster_state.collected_points)} pts) "
+                f"near ({centroid_est[0]:.2f}, {centroid_est[1]:.2f}) м"
+            )
+            cluster_state.collected_points = []
+
+        spike_active = False
+        spike_points: List[Tuple[float, float]] = []
+        spike_start_time = 0.0
+        spike_start_logtime = ""
+        spike_end_logtime = ""
+        spike_events: List[Dict[str, Any]] = []
+
+        def finalize_spike(timestamp: float) -> None:
+            nonlocal spike_active, spike_points, spike_start_time, spike_start_logtime, spike_end_logtime, detected_touch_count, last_event_time, last_event_coords
+            if not spike_active or not spike_points:
+                spike_active = False
+                spike_points = []
+                return
+            xs, ys = zip(*spike_points)
+            centroid = (float(np.mean(xs)), float(np.mean(ys)))
+            points_cnt = len(spike_points)
+            detected_touch_count += 1
+            last_event_time = timestamp
+            last_event_coords = centroid
+            spike_events.append(
+                {
+                    "index": detected_touch_count,
+                    "start_time": spike_start_time,
+                    "end_time": timestamp,
+                    "start_logtime": spike_start_logtime,
+                    "end_logtime": spike_end_logtime,
+                    "points": points_cnt,
+                    "centroid": centroid,
+                }
+            )
+            print(
+                f"⚪ Spike #{detected_touch_count} {spike_start_logtime} → {spike_end_logtime} "
+                f"({centroid[0]:.2f}, {centroid[1]:.2f}) м — {points_cnt} променів"
+            )
+            event_server.send_event(
+                {
+                    "event": "touch_start",
+                    "x": centroid[0],
+                    "y": centroid[1],
+                    "points": points_cnt,
+                    "timestamp": timestamp,
+                }
+            )
+            event_server.send_event(
+                {
+                    "event": "touch_end",
+                    "x": centroid[0],
+                    "y": centroid[1],
+                    "timestamp": timestamp,
+                }
+            )
+            spike_active = False
+            spike_points = []
+
         while plt.fignum_exists(fig.number):
+            if paused:
+                fig.canvas.flush_events()
+                time.sleep(PAUSE_POLL_SECONDS)
+                continue
             try:
-                _, dist_mm = next_scan()
+                frame_timestamp, frame_logtime, dist_mm = next_scan()
             except RuntimeError as exc:
                 print(f"❌ Неможливо отримати дані від Hokuyo: {exc}")
                 time.sleep(LASER_RECONNECT_DELAY)
@@ -303,6 +438,22 @@ def run_touch_detection(
                     base_dist = (1 - smoothing) * base_dist + smoothing * dist_m
                 time.sleep(LOOP_SLEEP_SECONDS)
                 continue
+            if SPIKE_DETECTION_MODE:
+                if touch_points >= SPIKE_MIN_ACTIVE:
+                    coords_now = [(float(x[idx]), float(y[idx])) for idx in active_idx]
+                    if not spike_active:
+                        spike_active = True
+                        spike_points = []
+                        spike_start_time = now
+                        spike_start_logtime = frame_logtime
+                    spike_points.extend(coords_now)
+                    spike_end_logtime = frame_logtime
+                elif spike_active:
+                    finalize_spike(now)
+                if total_active_points == 0:
+                    base_dist = (1 - smoothing) * base_dist + smoothing * dist_m
+                time.sleep(LOOP_SLEEP_SECONDS)
+                continue
 
             detected_clusters = []
             if touch_points >= min_points:
@@ -317,6 +468,7 @@ def run_touch_detection(
                             "indices": actual_indices,
                             "centroid": centroid,
                             "points": int(actual_indices.size),
+                            "coords": list(zip(x_cluster.tolist(), y_cluster.tolist())),
                         }
                     )
 
@@ -350,6 +502,15 @@ def run_touch_detection(
                 cluster_state.touch_frames += 1
                 cluster_state.missing_frames = 0
                 cluster_state.updated = True
+                if ENABLE_MULTI_FRAME_CAPTURE:
+                    should_collect = detection["points"] >= MULTI_FRAME_MIN_POINTS
+                    if should_collect and cluster_state.collect_frames_remaining == 0 and not cluster_state.collected_points:
+                        cluster_state.collect_frames_remaining = MULTI_FRAME_WINDOW
+                    if cluster_state.collect_frames_remaining > 0:
+                        cluster_state.collected_points.extend(detection["coords"])
+                        cluster_state.collect_frames_remaining -= 1
+                        if cluster_state.collect_frames_remaining == 0:
+                            finalize_multi_frame_capture(assigned_id, cluster_state)
                 if DEBUG_LOGS:
                     print(
                         f"[debug] cluster_id={assigned_id} frames={cluster_state.touch_frames} centroid={cluster_state.centroid}"
@@ -363,7 +524,8 @@ def run_touch_detection(
                             dt = now - last_event_time
                             dx = cluster_state.centroid[0] - last_event_coords[0]
                             dy = cluster_state.centroid[1] - last_event_coords[1]
-                            same_event = dt <= 0.1 and (dx * dx + dy * dy) ** 0.5 <= 0.15
+                            distance = (dx * dx + dy * dy) ** 0.5
+                            same_event = dt <= MERGE_EVENT_MAX_TIME and distance <= MERGE_EVENT_MAX_DISTANCE
                         cluster_state.is_active = True
                         countable = cluster_state.points >= MIN_POINTS_FOR_COUNT
                         if not same_event and countable:
@@ -400,6 +562,10 @@ def run_touch_detection(
                     continue
                 cluster_state.touch_frames = 0
                 cluster_state.missing_frames += 1
+                if ENABLE_MULTI_FRAME_CAPTURE and cluster_state.collect_frames_remaining > 0:
+                    cluster_state.collect_frames_remaining -= 1
+                    if cluster_state.collect_frames_remaining == 0:
+                        finalize_multi_frame_capture(cluster_id, cluster_state)
                 if cluster_state.is_active and cluster_state.missing_frames >= deactivation_frames:
                     cluster_state.is_active = False
                     coords = cluster_state.last_touch_coords
@@ -424,7 +590,13 @@ def run_touch_detection(
                 base_dist = (1 - smoothing) * base_dist + smoothing * dist_m
             time.sleep(LOOP_SLEEP_SECONDS)
     finally:
+        if SPIKE_DETECTION_MODE and spike_active:
+            finalize_spike(time.time())
         event_server.shutdown()
         reset_laser()
         if detected_touch_count:
             print(f"ℹ️ Total detections: {detected_touch_count}")
+        if SPIKE_DETECTION_MODE and spike_events:
+            print(f"🧾 Виявлено {len(spike_events)} сплесків за порогами ≥{SPIKE_MIN_ACTIVE} променів")
+        if ENABLE_MULTI_FRAME_CAPTURE and multi_frame_clusters:
+            print(f"🧾 Зібрано {len(multi_frame_clusters)} мультикадрових кластерів для аналізу")
