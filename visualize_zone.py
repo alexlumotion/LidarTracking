@@ -36,11 +36,13 @@ def main():
     # 3) Алгоритм
     while True:
         algo_choice = input(
-            "Вибери алгоритм: 0 — сплески (SPIKE), 1 — усі точки (raw), 2 — debug-spike (поріг 0.04 м, мін. 5 променів, вікно 0.75 с): "
+            "Вибери алгоритм: 0 — сплески (SPIKE), 1 — усі точки (raw), 2 — debug-spike, "
+            "3 — пресет чутливий (0.04 м, ≥5), 4 — пресет баланс (0.07 м, ≥10), "
+            "5 — пресет стабільний (0.10 м, ≥12), 6 — кастом (введи поріг і мін. промені): "
         ).strip()
-        if algo_choice in {"0", "1", "2"}:
+        if algo_choice in {"0", "1", "2", "3", "4", "5", "6"}:
             break
-        print("Введи 0, 1 або 2.")
+        print("Введи 0, 1, 2, 3, 4, 5 або 6.")
 
     # Configure detection mode
     if algo_choice == "0":
@@ -48,6 +50,8 @@ def main():
         td.USE_RAW_POINTS = False
         td.ENABLE_THRESHOLD_FILTER = True
         td.DEBUG_SPIKE_MODE = False
+        td.SPIKE_THRESHOLD = 0.07
+        td.SPIKE_MIN_ACTIVE = 10
     else:
         td.DEBUG_SPIKE_MODE = False
         if algo_choice == "1":
@@ -56,13 +60,63 @@ def main():
             td.USE_RAW_POINTS = True
             td.ENABLE_THRESHOLD_FILTER = False
             td.ENABLE_ZONE_FILTER = True
-        else:
+        elif algo_choice == "2":
             # debug-spike: без порога, мінімум 5 променів, групування до 0.75 с
             td.SPIKE_DETECTION_MODE = False
             td.USE_RAW_POINTS = False
             td.ENABLE_THRESHOLD_FILTER = False
             td.DEBUG_SPIKE_MODE = True
             td.ENABLE_ZONE_FILTER = True
+            td.SPIKE_MIN_ACTIVE = td.DEBUG_SPIKE_MIN_ACTIVE
+        elif algo_choice == "3":
+            # Пресет чутливий
+            td.SPIKE_DETECTION_MODE = True
+            td.USE_RAW_POINTS = False
+            td.ENABLE_THRESHOLD_FILTER = True
+            td.SPIKE_THRESHOLD = 0.04
+            td.SPIKE_MIN_ACTIVE = 5
+        elif algo_choice == "4":
+            # Пресет баланс
+            td.SPIKE_DETECTION_MODE = True
+            td.USE_RAW_POINTS = False
+            td.ENABLE_THRESHOLD_FILTER = True
+            td.SPIKE_THRESHOLD = 0.07
+            td.SPIKE_MIN_ACTIVE = 10
+        elif algo_choice == "5":
+            # Пресет стабільний
+            td.SPIKE_DETECTION_MODE = True
+            td.USE_RAW_POINTS = False
+            td.ENABLE_THRESHOLD_FILTER = True
+            td.SPIKE_THRESHOLD = 0.10
+            td.SPIKE_MIN_ACTIVE = 12
+        else:
+            # Кастомний режим: вводимо поріг та мін. промені через термінал
+            def _ask_float(prompt: str, default: float) -> float:
+                raw = input(f"{prompt} (enter для {default}): ").strip()
+                if not raw:
+                    return default
+                try:
+                    return float(raw)
+                except ValueError:
+                    print("Невірне число, використовую значення за замовчанням.")
+                    return default
+
+            def _ask_int(prompt: str, default: int) -> int:
+                raw = input(f"{prompt} (enter для {default}): ").strip()
+                if not raw:
+                    return default
+                try:
+                    return int(raw)
+                except ValueError:
+                    print("Невірне ціле, використовую значення за замовчанням.")
+                    return default
+
+            td.SPIKE_DETECTION_MODE = True
+            td.USE_RAW_POINTS = False
+            td.ENABLE_THRESHOLD_FILTER = True
+            td.DEBUG_SPIKE_MODE = False
+            td.SPIKE_THRESHOLD = _ask_float("Введи поріг (м)", td.SPIKE_THRESHOLD)
+            td.SPIKE_MIN_ACTIVE = _ask_int("Введи мінімальну кількість променів", td.SPIKE_MIN_ACTIVE)
 
     event_server = TouchEventServer(SERVER_HOST, SERVER_PORT)
     td.run_touch_detection(zone_points, is_custom_zone, mode, radius_limit, event_server)
