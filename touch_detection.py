@@ -42,8 +42,12 @@ ENABLE_MULTI_FRAME_CAPTURE = True  # тестове накопичення то�
 MULTI_FRAME_WINDOW = 4  # скільки кадрів збирати підряд
 MULTI_FRAME_MIN_POINTS = 5  # мінімум променів, щоб стартувати збір
 SPIKE_DETECTION_MODE = True  # "сплеск" = серія кадрів з активними променями
-SPIKE_MIN_ACTIVE = 15  # мінімум променів для старту/підтримки сплеску
+SPIKE_MIN_ACTIVE = 10  # мінімум променів для старту/підтримки сплеску
 SPIKE_THRESHOLD = 0.07  # м; відхилення від бази для врахування променя
+DEBUG_SPIKE_MODE = False  # тестовий режим без порогу, групуємо сплеск із мінімумом променів
+DEBUG_SPIKE_MIN_ACTIVE = 5
+DEBUG_SPIKE_MAX_GAP = 0.75  # сек; макс пауза між кадрами активності в одному сирому сплеску
+DEBUG_SPIKE_THRESHOLD = 0.04  # м; мінімальне відхилення для debug-сплеску
 
 DETECTION_PRESETS = {
     "touch": {
@@ -71,8 +75,8 @@ DETECTION_PRESETS = {
 LOOP_SLEEP_SECONDS = 0.02
 # REPLAY_UBH_FILE: Optional[str] = "2025_11_19_13_03_37_675.ubh"  # шлях до .ubh для офлайнового тесту
 # Set to None to read live scans замість файлу
-REPLAY_UBH_FILE: Optional[str] = "2025_11_20_17_05_01_950.ubh"  # шлях до .ubh для офлайнового тесту
-REPLAY_SPEED = 3.0  # 1.0 = як записано, 0.5 = вдвічі повільніше, 2.0 = вдвічі швидше
+REPLAY_UBH_FILE: Optional[str] = "2025_11_26_19_34_28_050.ubh"  # шлях до .ubh для офлайнового тесту
+REPLAY_SPEED = 5.0  # 1.0 = як записано, 0.5 = вдвічі повільніше, 2.0 = вдвічі швидше
 PAUSE_POLL_SECONDS = 0.05  # затримка між перевірками паузи
 
 REPLAY_LOOP = False  # якщо True, після кінця файлу починаємо спочатку
@@ -192,6 +196,13 @@ def run_touch_detection(
     last_event_time = 0.0
     last_event_coords: Optional[Tuple[float, float]] = None
     multi_frame_clusters: List[Dict[str, Any]] = []
+    # Pre-initialize spike state so the finally block is safe even if calibration fails early
+    spike_active = False
+    spike_points: List[Tuple[float, float]] = []
+    spike_start_time = 0.0
+    spike_start_logtime = ""
+    spike_end_logtime = ""
+    spike_events: List[Dict[str, Any]] = []
     if REPLAY_UBH_FILE:
         replay_fetch = _make_replay_fetcher(FSPath(REPLAY_UBH_FILE), REPLAY_SPEED)
         speed_label = f"{REPLAY_SPEED:.2f}x" if abs(REPLAY_SPEED - 1.0) > 1e-3 else "1.0x"
@@ -309,13 +320,6 @@ def run_touch_detection(
             )
             cluster_state.collected_points = []
 
-        spike_active = False
-        spike_points: List[Tuple[float, float]] = []
-        spike_start_time = 0.0
-        spike_start_logtime = ""
-        spike_end_logtime = ""
-        spike_events: List[Dict[str, Any]] = []
-
         def finalize_spike(timestamp: float) -> None:
             nonlocal spike_active, spike_points, spike_start_time, spike_start_logtime, spike_end_logtime, detected_touch_count, last_event_time, last_event_coords
             if not spike_active or not spike_points:
@@ -363,6 +367,50 @@ def run_touch_detection(
             spike_active = False
             spike_points = []
 
+        raw_spike_active = False
+        raw_spike_points: List[Tuple[float, float]] = []
+        raw_spike_start_time = 0.0
+        raw_spike_start_logtime = ""
+        raw_spike_end_logtime = ""
+        raw_last_active_time = 0.0
+
+        def finalize_raw_spike(timestamp: float) -> None:
+            nonlocal raw_spike_active, raw_spike_points, raw_spike_start_time, raw_spike_start_logtime, raw_spike_end_logtime, detected_touch_count, last_event_time, last_event_coords
+            if not raw_spike_active or not raw_spike_points:
+                raw_spike_active = False
+                raw_spike_points = []
+                return
+            xs, ys = zip(*raw_spike_points)
+            centroid = (float(np.mean(xs)), float(np.mean(ys)))
+            points_cnt = len(raw_spike_points)
+            detected_touch_count += 1
+            last_event_time = timestamp
+            last_event_coords = centroid
+            duration = timestamp - raw_spike_start_time
+            print(
+                f"[debug-spike] #{detected_touch_count} {raw_spike_start_logtime} → {raw_spike_end_logtime} "
+                f"({centroid[0]:.2f}, {centroid[1]:.2f}) м — {points_cnt} променів, тривалість {duration:.3f} с"
+            )
+            event_server.send_event(
+                {
+                    "event": "touch_start",
+                    "x": centroid[0],
+                    "y": centroid[1],
+                    "points": points_cnt,
+                    "timestamp": timestamp,
+                }
+            )
+            event_server.send_event(
+                {
+                    "event": "touch_end",
+                    "x": centroid[0],
+                    "y": centroid[1],
+                    "timestamp": timestamp,
+                }
+            )
+            raw_spike_active = False
+            raw_spike_points = []
+
         while plt.fignum_exists(fig.number):
             if paused:
                 fig.canvas.flush_events()
@@ -403,7 +451,11 @@ def run_touch_detection(
                 signal_mask = diff >= touch_threshold
             else:
                 signal_mask = np.ones_like(diff, dtype=bool)
-            active_idx = np.where(signal_mask & inside_mask)[0]
+            if DEBUG_SPIKE_MODE:
+                # У debug-режимі активним вважаємо промінь, що став ближчим щонайменше на DEBUG_SPIKE_THRESHOLD
+                active_idx = np.where(inside_mask & (diff >= DEBUG_SPIKE_THRESHOLD))[0]
+            else:
+                active_idx = np.where(signal_mask & inside_mask)[0]
             touch_points = int(active_idx.size)
             total_active_points = touch_points
             now = time.time()
@@ -434,6 +486,23 @@ def run_touch_detection(
                                 "timestamp": now,
                             }
                         )
+                if total_active_points == 0:
+                    base_dist = (1 - smoothing) * base_dist + smoothing * dist_m
+                time.sleep(LOOP_SLEEP_SECONDS)
+                continue
+            if DEBUG_SPIKE_MODE:
+                if touch_points >= DEBUG_SPIKE_MIN_ACTIVE:
+                    coords_now = [(float(x[idx]), float(y[idx])) for idx in active_idx]
+                    if not raw_spike_active:
+                        raw_spike_active = True
+                        raw_spike_points = []
+                        raw_spike_start_time = now
+                        raw_spike_start_logtime = frame_logtime
+                    raw_spike_points.extend(coords_now)
+                    raw_spike_end_logtime = frame_logtime
+                    raw_last_active_time = now
+                elif raw_spike_active and (now - raw_last_active_time) >= DEBUG_SPIKE_MAX_GAP:
+                    finalize_raw_spike(now)
                 if total_active_points == 0:
                     base_dist = (1 - smoothing) * base_dist + smoothing * dist_m
                 time.sleep(LOOP_SLEEP_SECONDS)
@@ -590,6 +659,8 @@ def run_touch_detection(
                 base_dist = (1 - smoothing) * base_dist + smoothing * dist_m
             time.sleep(LOOP_SLEEP_SECONDS)
     finally:
+        if DEBUG_SPIKE_MODE and raw_spike_active:
+            finalize_raw_spike(time.time())
         if SPIKE_DETECTION_MODE and spike_active:
             finalize_spike(time.time())
         event_server.shutdown()
