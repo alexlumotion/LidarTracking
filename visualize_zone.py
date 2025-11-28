@@ -38,11 +38,12 @@ def main():
         algo_choice = input(
             "Вибери алгоритм: 0 — сплески (SPIKE), 1 — усі точки (raw), 2 — debug-spike, "
             "3 — пресет чутливий (0.04 м, ≥5), 4 — пресет баланс (0.07 м, ≥10), "
-            "5 — пресет стабільний (0.10 м, ≥12), 6 — кастом (введи поріг і мін. промені): "
+            "5 — пресет стабільний (0.10 м, ≥12), 6 — кастом (введи поріг і мін. промені), "
+            "7 — усі точки без фліпу/фільтрів: "
         ).strip()
-        if algo_choice in {"0", "1", "2", "3", "4", "5", "6"}:
+        if algo_choice in {"0", "1", "2", "3", "4", "5", "6", "7"}:
             break
-        print("Введи 0, 1, 2, 3, 4, 5 або 6.")
+        print("Введи 0, 1, 2, 3, 4, 5, 6 або 7.")
 
     # Configure detection mode
     if algo_choice == "0":
@@ -89,7 +90,7 @@ def main():
             td.ENABLE_THRESHOLD_FILTER = True
             td.SPIKE_THRESHOLD = 0.10
             td.SPIKE_MIN_ACTIVE = 12
-        else:
+        elif algo_choice == "6":
             # Кастомний режим: вводимо поріг та мін. промені через термінал
             def _ask_float(prompt: str, default: float) -> float:
                 raw = input(f"{prompt} (enter для {default}): ").strip()
@@ -117,6 +118,14 @@ def main():
             td.DEBUG_SPIKE_MODE = False
             td.SPIKE_THRESHOLD = _ask_float("Введи поріг (м)", td.SPIKE_THRESHOLD)
             td.SPIKE_MIN_ACTIVE = _ask_int("Введи мінімальну кількість променів", td.SPIKE_MIN_ACTIVE)
+        else:
+            # Усі точки без фліпу та фільтрів зони/порога
+            td.FLIP_Y = False
+            td.SPIKE_DETECTION_MODE = False
+            td.USE_RAW_POINTS = True
+            td.ENABLE_THRESHOLD_FILTER = False
+            td.ENABLE_ZONE_FILTER = False
+            td.DEBUG_SPIKE_MODE = False
 
     event_server = TouchEventServer(SERVER_HOST, SERVER_PORT)
     td.run_touch_detection(zone_points, is_custom_zone, mode, radius_limit, event_server)
