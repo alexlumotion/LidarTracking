@@ -119,13 +119,22 @@ def main():
             td.SPIKE_THRESHOLD = _ask_float("Введи поріг (м)", td.SPIKE_THRESHOLD)
             td.SPIKE_MIN_ACTIVE = _ask_int("Введи мінімальну кількість променів", td.SPIKE_MIN_ACTIVE)
         else:
-            # Усі точки без фліпу та фільтрів зони/порога
+            # Усі точки без фліпу, але з прямокутним фільтром X:[0.25,2.0], Y:[-1.5,1.5]
             td.FLIP_Y = False
             td.SPIKE_DETECTION_MODE = False
             td.USE_RAW_POINTS = True
             td.ENABLE_THRESHOLD_FILTER = False
-            td.ENABLE_ZONE_FILTER = False
+            td.ENABLE_ZONE_FILTER = True
             td.DEBUG_SPIKE_MODE = False
+            # Прямокутник: forward (X) 0.25..2.0, lateral (Y) -1.5..1.5
+            zone_points = [
+                (0.25, -1.5),
+                (2.0, -1.5),
+                (2.0, 1.5),
+                (0.25, 1.5),
+            ]
+            is_custom_zone = True
+            mode = "polygon"
 
     event_server = TouchEventServer(SERVER_HOST, SERVER_PORT)
     td.run_touch_detection(zone_points, is_custom_zone, mode, radius_limit, event_server)
